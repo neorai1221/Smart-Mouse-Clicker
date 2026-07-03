@@ -1,9 +1,12 @@
 import ctypes
+import json
+import sys
 import random
 import threading
 import time
 import tkinter as tk
 from dataclasses import dataclass
+from pathlib import Path
 from tkinter import messagebox, ttk
 
 
@@ -19,6 +22,20 @@ MOUSEEVENTF_MIDDLEUP = 0x0040
 
 VK_F8 = 0x77
 VK_F9 = 0x78
+
+SM_XVIRTUALSCREEN = 76
+SM_YVIRTUALSCREEN = 77
+SM_CXVIRTUALSCREEN = 78
+SM_CYVIRTUALSCREEN = 79
+
+DEFAULT_CONFIG = {
+    "interval_minutes": 5,
+    "jitter_seconds": 15,
+    "idle_only": True,
+    "idle_seconds": 30,
+    "click_button": "Left",
+    "double_click": False,
+}
 
 
 class POINT(ctypes.Structure):
@@ -56,6 +73,38 @@ def get_idle_seconds():
     return max(0, elapsed_ms / 1000)
 
 
+def get_config_path():
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().with_name("config.json")
+    return Path(__file__).resolve().with_name("config.json")
+
+
+def load_config():
+    config_path = get_config_path()
+    if not config_path.exists():
+        return DEFAULT_CONFIG.copy()
+
+    try:
+        with config_path.open("r", encoding="utf-8") as file:
+            loaded = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return DEFAULT_CONFIG.copy()
+
+    config = DEFAULT_CONFIG.copy()
+    for key in DEFAULT_CONFIG:
+        if key in loaded:
+            config[key] = loaded[key]
+    return config
+
+
+def get_virtual_screen_bounds():
+    x = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+    y = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+    width = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+    height = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+    return x, y, width, height
+
+
 def key_pressed(vk_code):
     return bool(user32.GetAsyncKeyState(vk_code) & 1)
 
@@ -81,6 +130,8 @@ class SmartClickerApp:
         self.root = root
         self.root.title("Smart Mouse Clicker")
         self.root.resizable(False, False)
+        self.config_path = get_config_path()
+        self.saved_config = load_config()
 
         self.running = False
         self.worker = None
@@ -88,22 +139,26 @@ class SmartClickerApp:
         self.next_click_at = None
         self.click_count = 0
         self.last_hotkey_action = 0
+        self.overlay = None
+        self.settings_trace_ids = []
 
-        self.interval_minutes = tk.DoubleVar(value=5)
-        self.jitter_seconds = tk.DoubleVar(value=15)
-        self.idle_only = tk.BooleanVar(value=True)
-        self.idle_seconds = tk.DoubleVar(value=30)
-        self.click_button = tk.StringVar(value="Left")
-        self.double_click = tk.BooleanVar(value=False)
+        self.interval_minutes = tk.DoubleVar(value=self.saved_config["interval_minutes"])
+        self.jitter_seconds = tk.DoubleVar(value=self.saved_config["jitter_seconds"])
+        self.idle_only = tk.BooleanVar(value=self.saved_config["idle_only"])
+        self.idle_seconds = tk.DoubleVar(value=self.saved_config["idle_seconds"])
+        self.click_button = tk.StringVar(value=self.saved_config["click_button"])
+        self.double_click = tk.BooleanVar(value=self.saved_config["double_click"])
         self.use_fixed_position = tk.BooleanVar(value=False)
         self.fixed_x = tk.IntVar(value=0)
         self.fixed_y = tk.IntVar(value=0)
+        self.position_text = tk.StringVar(value="No location selected")
 
         self.status_text = tk.StringVar(value="Ready. F8 starts/stops, F9 quits.")
         self.countdown_text = tk.StringVar(value="Next click: -")
         self.clicks_text = tk.StringVar(value="Clicks: 0")
 
         self.build_ui()
+        self.bind_setting_saves()
         self.root.protocol("WM_DELETE_WINDOW", self.quit_app)
         self.tick()
 
@@ -175,6 +230,7 @@ class SmartClickerApp:
 
         position_frame = ttk.LabelFrame(frame, text="Position", padding=10)
         position_frame.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        position_frame.columnconfigure(1, weight=1)
 
         ttk.Checkbutton(
             position_frame,
@@ -182,27 +238,20 @@ class SmartClickerApp:
             variable=self.use_fixed_position,
         ).grid(row=0, column=0, columnspan=3, sticky="w")
 
-        ttk.Label(position_frame, text="X").grid(row=1, column=0, sticky="w", pady=(8, 0))
-        ttk.Spinbox(position_frame, from_=0, to=9999, textvariable=self.fixed_x, width=8).grid(
+        ttk.Label(position_frame, text="Selected location").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(position_frame, textvariable=self.position_text).grid(
             row=1,
             column=1,
+            columnspan=2,
             sticky="w",
-            padx=(6, 12),
-            pady=(8, 0),
-        )
-        ttk.Label(position_frame, text="Y").grid(row=1, column=2, sticky="w", pady=(8, 0))
-        ttk.Spinbox(position_frame, from_=0, to=9999, textvariable=self.fixed_y, width=8).grid(
-            row=1,
-            column=3,
-            sticky="w",
-            padx=(6, 0),
+            padx=(12, 0),
             pady=(8, 0),
         )
 
-        ttk.Button(position_frame, text="Use current mouse position", command=self.capture_position).grid(
+        ttk.Button(position_frame, text="Choose Location", command=self.choose_location).grid(
             row=2,
             column=0,
-            columnspan=4,
+            columnspan=3,
             sticky="ew",
             pady=(10, 0),
         )
@@ -224,12 +273,94 @@ class SmartClickerApp:
         for child in frame.winfo_children():
             child.grid_configure(padx=0)
 
-    def capture_position(self):
-        x, y = get_cursor_position()
+    def bind_setting_saves(self):
+        for variable in (
+            self.interval_minutes,
+            self.jitter_seconds,
+            self.idle_only,
+            self.idle_seconds,
+            self.click_button,
+            self.double_click,
+        ):
+            trace_id = variable.trace_add("write", lambda *_: self.save_config())
+            self.settings_trace_ids.append((variable, trace_id))
+
+    def save_config(self):
+        config = {
+            "interval_minutes": self.safe_float(self.interval_minutes, DEFAULT_CONFIG["interval_minutes"]),
+            "jitter_seconds": self.safe_float(self.jitter_seconds, DEFAULT_CONFIG["jitter_seconds"]),
+            "idle_only": bool(self.idle_only.get()),
+            "idle_seconds": self.safe_float(self.idle_seconds, DEFAULT_CONFIG["idle_seconds"]),
+            "click_button": self.click_button.get() if self.click_button.get() in ("Left", "Right", "Middle") else "Left",
+            "double_click": bool(self.double_click.get()),
+        }
+
+        try:
+            with self.config_path.open("w", encoding="utf-8") as file:
+                json.dump(config, file, indent=2)
+        except OSError:
+            self.status_text.set("Could not save settings.")
+
+    @staticmethod
+    def safe_float(variable, fallback):
+        try:
+            return float(variable.get())
+        except (tk.TclError, ValueError):
+            return fallback
+
+    def choose_location(self):
+        if self.overlay is not None:
+            return
+        self.root.withdraw()
+        self.root.after(120, self.show_selection_overlay)
+
+    def show_selection_overlay(self):
+        x, y, width, height = get_virtual_screen_bounds()
+        overlay = tk.Toplevel(self.root)
+        self.overlay = overlay
+        overlay.overrideredirect(True)
+        overlay.attributes("-topmost", True)
+        overlay.attributes("-alpha", 0.35)
+        overlay.configure(bg="#6b7280", cursor="crosshair")
+        overlay.geometry(f"{width}x{height}{x:+d}{y:+d}")
+        overlay.focus_force()
+
+        hint = tk.Label(
+            overlay,
+            text="Click anywhere to choose the click location. Press Esc to cancel.",
+            bg="#374151",
+            fg="white",
+            font=("Segoe UI", 14),
+            padx=18,
+            pady=10,
+        )
+        hint.place(relx=0.5, rely=0.08, anchor="center")
+
+        overlay.bind("<Button-1>", self.finish_location_selection)
+        overlay.bind("<Escape>", self.cancel_location_selection)
+
+    def finish_location_selection(self, event):
+        self.set_position(event.x_root, event.y_root)
+        self.close_selection_overlay()
+        self.status_text.set(f"Captured position: {event.x_root}, {event.y_root}")
+
+    def cancel_location_selection(self, _event=None):
+        self.close_selection_overlay()
+        self.status_text.set("Location selection cancelled.")
+
+    def close_selection_overlay(self):
+        if self.overlay is not None:
+            self.overlay.destroy()
+            self.overlay = None
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def set_position(self, x, y):
         self.fixed_x.set(x)
         self.fixed_y.set(y)
         self.use_fixed_position.set(True)
-        self.status_text.set(f"Captured position: {x}, {y}")
+        self.position_text.set(f"X: {x}   Y: {y}")
 
     def read_settings(self):
         interval = max(1, float(self.interval_minutes.get()) * 60)
@@ -256,6 +387,8 @@ class SmartClickerApp:
             messagebox.showerror("Invalid settings", str(exc))
             return
 
+        self.save_config()
+
         self.running = True
         self.stop_event.clear()
         self.start_button.configure(state="disabled")
@@ -276,7 +409,10 @@ class SmartClickerApp:
         self.countdown_text.set("Next click: -")
 
     def quit_app(self):
+        self.save_config()
         self.stop()
+        if self.overlay is not None:
+            self.overlay.destroy()
         self.root.destroy()
 
     def run_clicker(self, settings):

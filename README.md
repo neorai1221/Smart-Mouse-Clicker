@@ -9,7 +9,9 @@ A small Windows utility that clicks the mouse at a configurable interval.
 - Optional random timing jitter
 - Left, right, middle, and double-click options
 - Optional fixed screen position
+- Full-screen crosshair overlay for choosing the click location
 - Optional idle-only mode
+- Persistent settings saved to `config.json`
 - `F8` toggles start/stop
 - `F9` exits
 - Moving the cursor to the top-left corner stops the clicker
@@ -38,6 +40,11 @@ The built app is created at:
 ```text
 dist\Smart Mouse Clicker.exe
 ```
+
+## Settings
+
+The app saves timing and click preferences to `config.json` next to the script or compiled EXE.
+The selected X,Y coordinate is intentionally not saved, so choose a fresh location each time the app opens.
 
 ## Included Files
 
