@@ -1,6 +1,6 @@
-# Smart Mouse Clicker
+# Smart Mouse Clicker V2
 
-A small Windows utility that clicks the mouse at a configurable interval.
+A Windows utility that clicks the mouse at a configurable interval.
 
 ## Features
 
@@ -9,9 +9,9 @@ A small Windows utility that clicks the mouse at a configurable interval.
 - Optional random timing jitter
 - Left, right, middle, and double-click options
 - Optional fixed screen position
-- Full-screen crosshair overlay for choosing the click location
+- Multi-monitor, full-screen crosshair overlay for choosing the click location
 - Optional idle-only mode
-- Persistent settings saved to `config.json`
+- Persistent settings stored privately in Windows app data
 - `F8` toggles start/stop
 - `F9` exits
 - Moving the cursor to the top-left corner stops the clicker
@@ -32,24 +32,25 @@ python scripts\smart_mouse_clicker.py
 
 ```powershell
 py -m pip install pyinstaller
-py -m PyInstaller --noconfirm --clean --onefile --windowed --name "Smart Mouse Clicker" --icon "assets\clicker.ico" "scripts\smart_mouse_clicker.py"
+py -m PyInstaller --noconfirm --clean --onefile --windowed --name "Smart Mouse Clicker V2" --icon "assets\clicker.ico" --add-data "assets\clicker-title-256.ico;assets" "scripts\smart_mouse_clicker.py"
 ```
 
 The built app is created at:
 
 ```text
-dist\Smart Mouse Clicker.exe
+dist\Smart Mouse Clicker V2.exe
 ```
 
 ## Settings
 
-The app saves timing and click preferences to `config.json` next to the script or compiled EXE.
+The app saves timing and click preferences to `%LOCALAPPDATA%\Smart Mouse Clicker V2\config.json`, so no settings file appears beside the EXE.
 The selected X,Y coordinate is intentionally not saved, so choose a fresh location each time the app opens.
 
 ## Included Files
 
 - `scripts\smart_mouse_clicker.py` - main Python app
 - `scripts\run_smart_mouse_clicker.bat` - convenience launcher
-- `assets\clicker.ico` - app icon
-- `dist\Smart Mouse Clicker.exe` - built Windows executable
-- `dist\Smart Mouse Clicker.zip` - zipped executable
+- `assets\clicker.ico` - original pointer-clicker app icon
+- `assets\clicker-title-256.ico` - original 256px pointer-clicker title-bar icon
+- `dist\Smart Mouse Clicker V2.exe` - built Windows executable
+- `dist\Smart Mouse Clicker V2.zip` - zipped executable

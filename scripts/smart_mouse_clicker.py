@@ -1,5 +1,6 @@
 import ctypes
 import json
+import os
 import sys
 import random
 import threading
@@ -12,6 +13,27 @@ from tkinter import messagebox, ttk
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
+
+
+def enable_per_monitor_dpi_awareness():
+    """Keep Tkinter's overlay coordinates aligned with every Windows display."""
+    try:
+        # Per-monitor V2 is available on modern Windows 10 and 11 systems.
+        if user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return
+    except (AttributeError, OSError):
+        pass
+
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except (AttributeError, OSError):
+        try:
+            user32.SetProcessDPIAware()
+        except (AttributeError, OSError):
+            pass
+
+
+enable_per_monitor_dpi_awareness()
 
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
@@ -28,6 +50,11 @@ SM_YVIRTUALSCREEN = 77
 SM_CXVIRTUALSCREEN = 78
 SM_CYVIRTUALSCREEN = 79
 
+APP_NAME = "Smart Mouse Clicker V2"
+LEGACY_APP_NAME = "Smart Mouse Clicker"
+WINDOW_WIDTH = 620
+WINDOW_HEIGHT = 1100
+
 DEFAULT_CONFIG = {
     "interval_minutes": 5,
     "jitter_seconds": 15,
@@ -37,13 +64,30 @@ DEFAULT_CONFIG = {
     "double_click": False,
 }
 
-
 class POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
 
 class LASTINPUTINFO(ctypes.Structure):
     _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+
+class RECT(ctypes.Structure):
+    _fields_ = [
+        ("left", ctypes.c_long),
+        ("top", ctypes.c_long),
+        ("right", ctypes.c_long),
+        ("bottom", ctypes.c_long),
+    ]
+
+
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", ctypes.c_ulong),
+        ("rcMonitor", RECT),
+        ("rcWork", RECT),
+        ("dwFlags", ctypes.c_ulong),
+    ]
 
 
 @dataclass
@@ -73,21 +117,34 @@ def get_idle_seconds():
     return max(0, elapsed_ms / 1000)
 
 
+def get_app_data_root():
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    return Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
+
+
 def get_config_path():
+    """Store preferences in the user's private Windows app-data folder."""
+    return get_app_data_root() / APP_NAME / "config.json"
+
+
+def get_legacy_config_paths():
+    """Find previous settings locations so the V2 update keeps user preferences."""
+    legacy_paths = [get_app_data_root() / LEGACY_APP_NAME / "config.json"]
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().with_name("config.json")
-    return Path(__file__).resolve().with_name("config.json")
+        legacy_paths.append(Path(sys.executable).resolve().with_name("config.json"))
+    else:
+        legacy_paths.append(Path(__file__).resolve().with_name("config.json"))
+    return legacy_paths
 
 
-def load_config():
-    config_path = get_config_path()
-    if not config_path.exists():
-        return DEFAULT_CONFIG.copy()
+def get_resource_path(relative_path):
+    """Locate bundled files both in source mode and in a PyInstaller EXE."""
+    base_path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+    return base_path / relative_path
 
-    try:
-        with config_path.open("r", encoding="utf-8") as file:
-            loaded = json.load(file)
-    except (OSError, json.JSONDecodeError):
+
+def normalize_config(loaded):
+    if not isinstance(loaded, dict):
         return DEFAULT_CONFIG.copy()
 
     config = DEFAULT_CONFIG.copy()
@@ -97,12 +154,86 @@ def load_config():
     return config
 
 
-def get_virtual_screen_bounds():
-    x = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
-    y = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
-    width = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
-    height = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
-    return x, y, width, height
+def read_config(config_path):
+    if not config_path.exists():
+        return None
+
+    try:
+        with config_path.open("r", encoding="utf-8") as file:
+            loaded = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    return normalize_config(loaded)
+
+
+def write_config(config_path, config):
+    try:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        with config_path.open("w", encoding="utf-8") as file:
+            json.dump(config, file, indent=2)
+    except OSError:
+        return False
+    return True
+
+
+def load_config():
+    config_path = get_config_path()
+    saved_config = read_config(config_path)
+    if saved_config is not None:
+        return saved_config
+
+    legacy_config_paths = get_legacy_config_paths()
+    for legacy_config_path in legacy_config_paths:
+        legacy_config = read_config(legacy_config_path)
+        if legacy_config is None:
+            continue
+
+        # Move existing preferences out of old app locations after a successful copy.
+        if write_config(config_path, legacy_config):
+            for old_config_path in legacy_config_paths:
+                try:
+                    old_config_path.unlink()
+                except OSError:
+                    pass
+        return legacy_config
+
+    return DEFAULT_CONFIG.copy()
+
+
+def get_monitor_bounds():
+    """Return the actual bounds of every connected monitor in desktop pixels."""
+    monitors = []
+    callback_type = ctypes.WINFUNCTYPE(
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(RECT),
+        ctypes.c_void_p,
+    )
+
+    @callback_type
+    def collect_monitor(monitor, _hdc, _rect, _data):
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(MONITORINFO)
+        if user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            rect = info.rcMonitor
+            monitors.append((rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top))
+        return 1
+
+    user32.EnumDisplayMonitors(None, None, collect_monitor, None)
+    if monitors:
+        return monitors
+
+    # A conservative fallback for unusual Windows configurations.
+    return [
+        (
+            user32.GetSystemMetrics(SM_XVIRTUALSCREEN),
+            user32.GetSystemMetrics(SM_YVIRTUALSCREEN),
+            user32.GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            user32.GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        )
+    ]
 
 
 def key_pressed(vk_code):
@@ -128,7 +259,8 @@ def perform_click(button_name, double_click=False):
 class SmartClickerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Smart Mouse Clicker")
+        self.root.title(APP_NAME)
+        self.root.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")
         self.root.resizable(False, False)
         self.config_path = get_config_path()
         self.saved_config = load_config()
@@ -139,7 +271,7 @@ class SmartClickerApp:
         self.next_click_at = None
         self.click_count = 0
         self.last_hotkey_action = 0
-        self.overlay = None
+        self.overlays = []
         self.settings_trace_ids = []
 
         self.interval_minutes = tk.DoubleVar(value=self.saved_config["interval_minutes"])
@@ -158,16 +290,25 @@ class SmartClickerApp:
         self.clicks_text = tk.StringVar(value="Clicks: 0")
 
         self.build_ui()
+        self.root.after_idle(self.apply_window_icon, self.root)
         self.bind_setting_saves()
         self.root.protocol("WM_DELETE_WINDOW", self.quit_app)
         self.tick()
 
     def build_ui(self):
-        frame = ttk.Frame(self.root, padding=16)
-        frame.grid(row=0, column=0, sticky="nsew")
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
 
-        interval_frame = ttk.LabelFrame(frame, text="Timing", padding=10)
+        frame = ttk.Frame(self.root, padding=22)
+        frame.grid(row=0, column=0, sticky="nsew")
+        frame.columnconfigure(0, weight=1)
+        for row, weight in ((0, 2), (1, 2), (2, 2), (3, 3)):
+            frame.rowconfigure(row, weight=weight)
+
+        interval_frame = ttk.LabelFrame(frame, text="Timing", padding=14)
         interval_frame.grid(row=0, column=0, sticky="ew")
+        interval_frame.rowconfigure(0, weight=1)
+        interval_frame.rowconfigure(1, weight=1)
 
         ttk.Label(interval_frame, text="Interval (minutes)").grid(row=0, column=0, sticky="w")
         ttk.Spinbox(
@@ -179,7 +320,7 @@ class SmartClickerApp:
             width=10,
         ).grid(row=0, column=1, sticky="e", padx=(12, 0))
 
-        ttk.Label(interval_frame, text="Random jitter (+/- seconds)").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(interval_frame, text="Random jitter (+/- seconds)").grid(row=1, column=0, sticky="w", pady=(10, 0))
         ttk.Spinbox(
             interval_frame,
             from_=0,
@@ -187,10 +328,12 @@ class SmartClickerApp:
             increment=5,
             textvariable=self.jitter_seconds,
             width=10,
-        ).grid(row=1, column=1, sticky="e", padx=(12, 0), pady=(8, 0))
+        ).grid(row=1, column=1, sticky="e", padx=(12, 0), pady=(10, 0))
 
-        idle_frame = ttk.LabelFrame(frame, text="Safety", padding=10)
-        idle_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        idle_frame = ttk.LabelFrame(frame, text="Safety", padding=14)
+        idle_frame.grid(row=1, column=0, sticky="ew", pady=(14, 0))
+        idle_frame.rowconfigure(0, weight=1)
+        idle_frame.rowconfigure(1, weight=1)
 
         ttk.Checkbutton(
             idle_frame,
@@ -198,7 +341,7 @@ class SmartClickerApp:
             variable=self.idle_only,
         ).grid(row=0, column=0, columnspan=2, sticky="w")
 
-        ttk.Label(idle_frame, text="Required idle time (seconds)").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(idle_frame, text="Required idle time (seconds)").grid(row=1, column=0, sticky="w", pady=(10, 0))
         ttk.Spinbox(
             idle_frame,
             from_=0,
@@ -206,10 +349,12 @@ class SmartClickerApp:
             increment=5,
             textvariable=self.idle_seconds,
             width=10,
-        ).grid(row=1, column=1, sticky="e", padx=(12, 0), pady=(8, 0))
+        ).grid(row=1, column=1, sticky="e", padx=(12, 0), pady=(10, 0))
 
-        click_frame = ttk.LabelFrame(frame, text="Click", padding=10)
-        click_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        click_frame = ttk.LabelFrame(frame, text="Click", padding=14)
+        click_frame.grid(row=2, column=0, sticky="ew", pady=(14, 0))
+        click_frame.rowconfigure(0, weight=1)
+        click_frame.rowconfigure(1, weight=1)
 
         ttk.Label(click_frame, text="Button").grid(row=0, column=0, sticky="w")
         ttk.Combobox(
@@ -225,12 +370,14 @@ class SmartClickerApp:
             column=0,
             columnspan=2,
             sticky="w",
-            pady=(8, 0),
+            pady=(10, 0),
         )
 
-        position_frame = ttk.LabelFrame(frame, text="Position", padding=10)
-        position_frame.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        position_frame = ttk.LabelFrame(frame, text="Position", padding=14)
+        position_frame.grid(row=3, column=0, sticky="ew", pady=(14, 0))
         position_frame.columnconfigure(1, weight=1)
+        for row in range(3):
+            position_frame.rowconfigure(row, weight=1)
 
         ttk.Checkbutton(
             position_frame,
@@ -238,14 +385,14 @@ class SmartClickerApp:
             variable=self.use_fixed_position,
         ).grid(row=0, column=0, columnspan=3, sticky="w")
 
-        ttk.Label(position_frame, text="Selected location").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(position_frame, text="Selected location").grid(row=1, column=0, sticky="w", pady=(10, 0))
         ttk.Label(position_frame, textvariable=self.position_text).grid(
             row=1,
             column=1,
             columnspan=2,
             sticky="w",
             padx=(12, 0),
-            pady=(8, 0),
+            pady=(10, 0),
         )
 
         ttk.Button(position_frame, text="Choose Location", command=self.choose_location).grid(
@@ -253,11 +400,11 @@ class SmartClickerApp:
             column=0,
             columnspan=3,
             sticky="ew",
-            pady=(10, 0),
+            pady=(12, 0),
         )
 
         controls = ttk.Frame(frame)
-        controls.grid(row=4, column=0, sticky="ew", pady=(14, 0))
+        controls.grid(row=4, column=0, sticky="ew", pady=(18, 0))
         controls.columnconfigure(0, weight=1)
         controls.columnconfigure(1, weight=1)
 
@@ -266,12 +413,21 @@ class SmartClickerApp:
         self.stop_button = ttk.Button(controls, text="Stop", command=self.stop, state="disabled")
         self.stop_button.grid(row=0, column=1, sticky="ew", padx=(6, 0))
 
-        ttk.Label(frame, textvariable=self.status_text).grid(row=5, column=0, sticky="w", pady=(12, 0))
-        ttk.Label(frame, textvariable=self.countdown_text).grid(row=6, column=0, sticky="w", pady=(4, 0))
-        ttk.Label(frame, textvariable=self.clicks_text).grid(row=7, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(frame, textvariable=self.status_text).grid(row=5, column=0, sticky="w", pady=(14, 0))
+        ttk.Label(frame, textvariable=self.countdown_text).grid(row=6, column=0, sticky="w", pady=(7, 0))
+        ttk.Label(frame, textvariable=self.clicks_text).grid(row=7, column=0, sticky="w", pady=(7, 0))
 
         for child in frame.winfo_children():
             child.grid_configure(padx=0)
+
+    @staticmethod
+    def apply_window_icon(window):
+        """Use the original 256px pointer icon without a lower-resolution fallback."""
+        icon_path = str(get_resource_path("assets/clicker-title-256.ico"))
+        try:
+            window.iconbitmap(default=icon_path)
+        except tk.TclError:
+            pass
 
     def bind_setting_saves(self):
         for variable in (
@@ -295,10 +451,7 @@ class SmartClickerApp:
             "double_click": bool(self.double_click.get()),
         }
 
-        try:
-            with self.config_path.open("w", encoding="utf-8") as file:
-                json.dump(config, file, indent=2)
-        except OSError:
+        if not write_config(self.config_path, config):
             self.status_text.set("Could not save settings.")
 
     @staticmethod
@@ -309,35 +462,39 @@ class SmartClickerApp:
             return fallback
 
     def choose_location(self):
-        if self.overlay is not None:
+        if self.overlays:
             return
         self.root.withdraw()
         self.root.after(120, self.show_selection_overlay)
 
     def show_selection_overlay(self):
-        x, y, width, height = get_virtual_screen_bounds()
-        overlay = tk.Toplevel(self.root)
-        self.overlay = overlay
-        overlay.overrideredirect(True)
-        overlay.attributes("-topmost", True)
-        overlay.attributes("-alpha", 0.35)
-        overlay.configure(bg="#6b7280", cursor="crosshair")
-        overlay.geometry(f"{width}x{height}{x:+d}{y:+d}")
-        overlay.focus_force()
+        for index, (x, y, width, height) in enumerate(get_monitor_bounds()):
+            overlay = tk.Toplevel(self.root)
+            self.overlays.append(overlay)
+            overlay.after_idle(self.apply_window_icon, overlay)
+            overlay.overrideredirect(True)
+            overlay.attributes("-topmost", True)
+            overlay.attributes("-alpha", 0.35)
+            overlay.configure(bg="#6b7280", cursor="crosshair")
+            overlay.geometry(f"{width}x{height}{x:+d}{y:+d}")
+            overlay.bind("<Button-1>", self.finish_location_selection)
+            overlay.bind("<Escape>", self.cancel_location_selection)
 
-        hint = tk.Label(
-            overlay,
-            text="Click anywhere to choose the click location. Press Esc to cancel.",
-            bg="#374151",
-            fg="white",
-            font=("Segoe UI", 14),
-            padx=18,
-            pady=10,
-        )
-        hint.place(relx=0.5, rely=0.08, anchor="center")
+            if index == 0:
+                hint = tk.Label(
+                    overlay,
+                    text="Click anywhere to choose the click location. Press Esc to cancel.",
+                    bg="#374151",
+                    fg="white",
+                    font=("Segoe UI", 14),
+                    padx=18,
+                    pady=10,
+                )
+                hint.place(relx=0.5, rely=0.08, anchor="center")
+                hint.bind("<Button-1>", self.finish_location_selection)
 
-        overlay.bind("<Button-1>", self.finish_location_selection)
-        overlay.bind("<Escape>", self.cancel_location_selection)
+        if self.overlays:
+            self.overlays[0].focus_force()
 
     def finish_location_selection(self, event):
         self.set_position(event.x_root, event.y_root)
@@ -349,9 +506,10 @@ class SmartClickerApp:
         self.status_text.set("Location selection cancelled.")
 
     def close_selection_overlay(self):
-        if self.overlay is not None:
-            self.overlay.destroy()
-            self.overlay = None
+        for overlay in self.overlays:
+            if overlay.winfo_exists():
+                overlay.destroy()
+        self.overlays = []
         self.root.deiconify()
         self.root.lift()
         self.root.focus_force()
@@ -411,8 +569,10 @@ class SmartClickerApp:
     def quit_app(self):
         self.save_config()
         self.stop()
-        if self.overlay is not None:
-            self.overlay.destroy()
+        for overlay in self.overlays:
+            if overlay.winfo_exists():
+                overlay.destroy()
+        self.overlays = []
         self.root.destroy()
 
     def run_clicker(self, settings):
