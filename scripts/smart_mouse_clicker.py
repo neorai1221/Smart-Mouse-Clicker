@@ -297,6 +297,7 @@ class SmartClickerApp:
         self.tick()
 
     def build_ui(self):
+        self.root.columnconfigure(0, weight=1)
         frame = ttk.Frame(self.root, padding=16)
         frame.grid(row=0, column=0, sticky="ew")
         frame.columnconfigure(0, weight=1)
