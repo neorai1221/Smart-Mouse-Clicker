@@ -58,9 +58,12 @@ SM_CYVIRTUALSCREEN = 79
 
 APP_NAME = "Smart Mouse Clicker V2"
 LEGACY_APP_NAME = "Smart Mouse Clicker"
-WINDOW_PREFERRED_WIDTH = 460
+WINDOW_PREFERRED_WIDTH = 430
+WINDOW_WIDTH_RATIO = 0.14
+WINDOW_MIN_WIDTH = 400
 WINDOW_EDGE_MARGIN = 48
 WINDOW_BOTTOM_MARGIN = 96
+MONITOR_DEFAULTTONEAREST = 2
 
 DEFAULT_CONFIG = {
     "interval_minutes": 5,
@@ -343,6 +346,8 @@ class SmartClickerApp:
         self.last_hotkey_action = 0
         self.picker_process = None
         self.picker_result_path = None
+        self.current_monitor = None
+        self.monitor_resize_job = None
         self.settings_trace_ids = []
 
         self.interval_minutes = tk.DoubleVar(value=self.saved_config["interval_minutes"])
@@ -362,6 +367,7 @@ class SmartClickerApp:
 
         self.build_ui()
         self.size_window_to_content()
+        self.root.bind("<Configure>", self.handle_monitor_change, add="+")
         self.root.after_idle(self.apply_window_icon, self.root)
         self.bind_setting_saves()
         self.root.protocol("WM_DELETE_WINDOW", self.quit_app)
@@ -483,11 +489,39 @@ class SmartClickerApp:
     def size_window_to_content(self):
         """Keep the compact layout within the current screen's usable area."""
         self.root.update_idletasks()
-        max_width = max(400, self.root.winfo_screenwidth() - WINDOW_EDGE_MARGIN)
-        max_height = max(480, self.root.winfo_screenheight() - WINDOW_BOTTOM_MARGIN)
-        width = min(max(self.root.winfo_reqwidth(), WINDOW_PREFERRED_WIDTH), max_width)
+        monitor_width, monitor_height = self.get_current_monitor_size()
+        max_width = max(400, monitor_width - WINDOW_EDGE_MARGIN)
+        max_height = max(480, monitor_height - WINDOW_BOTTOM_MARGIN)
+        preferred_width = min(
+            WINDOW_PREFERRED_WIDTH,
+            max(WINDOW_MIN_WIDTH, int(monitor_width * WINDOW_WIDTH_RATIO)),
+        )
+        width = min(max(self.root.winfo_reqwidth(), preferred_width), max_width)
         height = min(self.root.winfo_reqheight(), max_height)
         self.root.geometry(f"{width}x{height}")
+
+    def get_current_monitor_size(self):
+        monitor = user32.MonitorFromWindow(self.root.winfo_id(), MONITOR_DEFAULTTONEAREST)
+        if monitor:
+            info = MONITORINFO()
+            info.cbSize = ctypes.sizeof(MONITORINFO)
+            if user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+                rect = info.rcMonitor
+                return rect.right - rect.left, rect.bottom - rect.top
+        return self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+
+    def handle_monitor_change(self, event):
+        if event.widget is not self.root:
+            return
+
+        monitor = user32.MonitorFromWindow(self.root.winfo_id(), MONITOR_DEFAULTTONEAREST)
+        if monitor == self.current_monitor:
+            return
+
+        self.current_monitor = monitor
+        if self.monitor_resize_job is not None:
+            self.root.after_cancel(self.monitor_resize_job)
+        self.monitor_resize_job = self.root.after(200, self.size_window_to_content)
 
     @staticmethod
     def apply_window_icon(window):
