@@ -3,9 +3,12 @@ import json
 import os
 import sys
 import random
+import subprocess
 import threading
 import time
 import tkinter as tk
+import tempfile
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from tkinter import messagebox, ttk
@@ -13,18 +16,22 @@ from tkinter import messagebox, ttk
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
+PICKER_ARGUMENT = "--pick-location"
+PICKER_MODE = PICKER_ARGUMENT in sys.argv
 
 
-def enable_per_monitor_dpi_awareness():
-    """Keep the main Tkinter window stable when moved across scaled monitors."""
+def enable_dpi_awareness():
+    """Use stable DPI for the app and pixel-accurate DPI for the picker helper."""
+    awareness_context = -4 if PICKER_MODE else -2
+    shcore_awareness = 2 if PICKER_MODE else 1
     try:
-        if user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-2)):
+        if user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(awareness_context)):
             return
     except (AttributeError, OSError):
         pass
 
     try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        ctypes.windll.shcore.SetProcessDpiAwareness(shcore_awareness)
     except (AttributeError, OSError):
         try:
             user32.SetProcessDPIAware()
@@ -32,22 +39,7 @@ def enable_per_monitor_dpi_awareness():
             pass
 
 
-enable_per_monitor_dpi_awareness()
-
-
-def enter_overlay_dpi_context():
-    """Use real monitor pixels only while creating the multi-monitor picker."""
-    try:
-        set_context = user32.SetThreadDpiAwarenessContext
-    except AttributeError:
-        return None
-
-    return set_context(ctypes.c_void_p(-4))
-
-
-def restore_dpi_context(previous_context):
-    if previous_context:
-        user32.SetThreadDpiAwarenessContext(previous_context)
+enable_dpi_awareness()
 
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
@@ -271,6 +263,70 @@ def perform_click(button_name, double_click=False):
         time.sleep(0.08)
 
 
+class LocationPicker:
+    """A short-lived per-monitor-DPI process dedicated to location selection."""
+
+    def __init__(self, result_path):
+        self.result_path = Path(result_path)
+        self.root = tk.Tk()
+        self.root.withdraw()
+        self.overlays = []
+        self.root.protocol("WM_DELETE_WINDOW", self.cancel)
+        self.show_overlays()
+
+    def show_overlays(self):
+        for index, (x, y, width, height) in enumerate(get_monitor_bounds()):
+            overlay = tk.Toplevel(self.root)
+            self.overlays.append(overlay)
+            overlay.overrideredirect(True)
+            overlay.attributes("-topmost", True)
+            overlay.attributes("-alpha", 0.35)
+            overlay.configure(bg="#6b7280", cursor="crosshair")
+            overlay.geometry(f"{width}x{height}{x:+d}{y:+d}")
+            overlay.bind("<Button-1>", self.capture_location)
+            overlay.bind("<Escape>", self.cancel)
+
+            if index == 0:
+                hint = tk.Label(
+                    overlay,
+                    text="Click anywhere to choose the click location. Press Esc to cancel.",
+                    bg="#374151",
+                    fg="white",
+                    font=("Segoe UI", 14),
+                    padx=18,
+                    pady=10,
+                )
+                hint.place(relx=0.5, rely=0.08, anchor="center")
+                hint.bind("<Button-1>", self.capture_location)
+
+        if self.overlays:
+            self.overlays[0].focus_force()
+
+    def capture_location(self, event):
+        self.finish({"x": event.x_root, "y": event.y_root})
+
+    def cancel(self, _event=None):
+        self.finish({"cancelled": True})
+
+    def finish(self, result):
+        try:
+            self.result_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary_path = self.result_path.with_name(f"{self.result_path.name}.tmp")
+            with temporary_path.open("w", encoding="utf-8") as file:
+                json.dump(result, file)
+            temporary_path.replace(self.result_path)
+        except OSError:
+            pass
+        finally:
+            for overlay in self.overlays:
+                if overlay.winfo_exists():
+                    overlay.destroy()
+            self.root.destroy()
+
+    def run(self):
+        self.root.mainloop()
+
+
 class SmartClickerApp:
     def __init__(self, root):
         self.root = root
@@ -285,7 +341,8 @@ class SmartClickerApp:
         self.next_click_at = None
         self.click_count = 0
         self.last_hotkey_action = 0
-        self.overlays = []
+        self.picker_process = None
+        self.picker_result_path = None
         self.settings_trace_ids = []
 
         self.interval_minutes = tk.DoubleVar(value=self.saved_config["interval_minutes"])
@@ -474,58 +531,56 @@ class SmartClickerApp:
             return fallback
 
     def choose_location(self):
-        if self.overlays:
+        if self.picker_process is not None:
             return
+
+        self.picker_result_path = Path(tempfile.gettempdir()) / f"smart_mouse_clicker_{uuid.uuid4().hex}.json"
         self.root.withdraw()
-        self.root.after(120, self.show_selection_overlay)
-
-    def show_selection_overlay(self):
-        previous_context = enter_overlay_dpi_context()
+        self.status_text.set("Choose a location on any connected monitor.")
         try:
-            for index, (x, y, width, height) in enumerate(get_monitor_bounds()):
-                overlay = tk.Toplevel(self.root)
-                self.overlays.append(overlay)
-                overlay.after_idle(self.apply_window_icon, overlay)
-                overlay.overrideredirect(True)
-                overlay.attributes("-topmost", True)
-                overlay.attributes("-alpha", 0.35)
-                overlay.configure(bg="#6b7280", cursor="crosshair")
-                overlay.geometry(f"{width}x{height}{x:+d}{y:+d}")
-                overlay.bind("<Button-1>", self.finish_location_selection)
-                overlay.bind("<Escape>", self.cancel_location_selection)
+            command = [sys.executable]
+            if not getattr(sys, "frozen", False):
+                command.append(str(Path(__file__).resolve()))
+            command.extend([PICKER_ARGUMENT, str(self.picker_result_path)])
+            self.picker_process = subprocess.Popen(command)
+        except OSError:
+            self.restore_after_picker()
+            self.status_text.set("Could not open the location picker.")
+            return
 
-                if index == 0:
-                    hint = tk.Label(
-                        overlay,
-                        text="Click anywhere to choose the click location. Press Esc to cancel.",
-                        bg="#374151",
-                        fg="white",
-                        font=("Segoe UI", 14),
-                        padx=18,
-                        pady=10,
-                    )
-                    hint.place(relx=0.5, rely=0.08, anchor="center")
-                    hint.bind("<Button-1>", self.finish_location_selection)
-        finally:
-            restore_dpi_context(previous_context)
+        self.root.after(100, self.poll_location_picker)
 
-        if self.overlays:
-            self.overlays[0].focus_force()
+    def poll_location_picker(self):
+        if self.picker_result_path and self.picker_result_path.exists():
+            try:
+                with self.picker_result_path.open("r", encoding="utf-8") as file:
+                    result = json.load(file)
+            except (OSError, json.JSONDecodeError):
+                result = {"cancelled": True}
+            finally:
+                try:
+                    self.picker_result_path.unlink()
+                except OSError:
+                    pass
 
-    def finish_location_selection(self, event):
-        self.set_position(event.x_root, event.y_root)
-        self.close_selection_overlay()
-        self.status_text.set(f"Captured position: {event.x_root}, {event.y_root}")
+            self.restore_after_picker()
+            if "x" in result and "y" in result:
+                self.set_position(int(result["x"]), int(result["y"]))
+                self.status_text.set(f"Captured position: {result['x']}, {result['y']}")
+            else:
+                self.status_text.set("Location selection cancelled.")
+            return
 
-    def cancel_location_selection(self, _event=None):
-        self.close_selection_overlay()
-        self.status_text.set("Location selection cancelled.")
+        if self.picker_process and self.picker_process.poll() is not None:
+            self.restore_after_picker()
+            self.status_text.set("Location selection closed without a selection.")
+            return
 
-    def close_selection_overlay(self):
-        for overlay in self.overlays:
-            if overlay.winfo_exists():
-                overlay.destroy()
-        self.overlays = []
+        self.root.after(100, self.poll_location_picker)
+
+    def restore_after_picker(self):
+        self.picker_process = None
+        self.picker_result_path = None
         self.root.deiconify()
         self.root.lift()
         self.root.focus_force()
@@ -585,10 +640,13 @@ class SmartClickerApp:
     def quit_app(self):
         self.save_config()
         self.stop()
-        for overlay in self.overlays:
-            if overlay.winfo_exists():
-                overlay.destroy()
-        self.overlays = []
+        if self.picker_process and self.picker_process.poll() is None:
+            self.picker_process.terminate()
+        if self.picker_result_path:
+            try:
+                self.picker_result_path.unlink()
+            except OSError:
+                pass
         self.root.destroy()
 
     def run_clicker(self, settings):
@@ -639,6 +697,13 @@ class SmartClickerApp:
 
 
 def main():
+    if PICKER_MODE:
+        argument_index = sys.argv.index(PICKER_ARGUMENT)
+        if argument_index + 1 >= len(sys.argv):
+            raise SystemExit("Missing location-picker result path.")
+        LocationPicker(sys.argv[argument_index + 1]).run()
+        return
+
     root = tk.Tk()
     SmartClickerApp(root)
     root.mainloop()
