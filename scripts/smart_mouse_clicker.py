@@ -16,16 +16,15 @@ kernel32 = ctypes.windll.kernel32
 
 
 def enable_per_monitor_dpi_awareness():
-    """Keep Tkinter's overlay coordinates aligned with every Windows display."""
+    """Keep the main Tkinter window stable when moved across scaled monitors."""
     try:
-        # Per-monitor V2 is available on modern Windows 10 and 11 systems.
-        if user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+        if user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-2)):
             return
     except (AttributeError, OSError):
         pass
 
     try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except (AttributeError, OSError):
         try:
             user32.SetProcessDPIAware()
@@ -34,6 +33,21 @@ def enable_per_monitor_dpi_awareness():
 
 
 enable_per_monitor_dpi_awareness()
+
+
+def enter_overlay_dpi_context():
+    """Use real monitor pixels only while creating the multi-monitor picker."""
+    try:
+        set_context = user32.SetThreadDpiAwarenessContext
+    except AttributeError:
+        return None
+
+    return set_context(ctypes.c_void_p(-4))
+
+
+def restore_dpi_context(previous_context):
+    if previous_context:
+        user32.SetThreadDpiAwarenessContext(previous_context)
 
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
@@ -466,30 +480,34 @@ class SmartClickerApp:
         self.root.after(120, self.show_selection_overlay)
 
     def show_selection_overlay(self):
-        for index, (x, y, width, height) in enumerate(get_monitor_bounds()):
-            overlay = tk.Toplevel(self.root)
-            self.overlays.append(overlay)
-            overlay.after_idle(self.apply_window_icon, overlay)
-            overlay.overrideredirect(True)
-            overlay.attributes("-topmost", True)
-            overlay.attributes("-alpha", 0.35)
-            overlay.configure(bg="#6b7280", cursor="crosshair")
-            overlay.geometry(f"{width}x{height}{x:+d}{y:+d}")
-            overlay.bind("<Button-1>", self.finish_location_selection)
-            overlay.bind("<Escape>", self.cancel_location_selection)
+        previous_context = enter_overlay_dpi_context()
+        try:
+            for index, (x, y, width, height) in enumerate(get_monitor_bounds()):
+                overlay = tk.Toplevel(self.root)
+                self.overlays.append(overlay)
+                overlay.after_idle(self.apply_window_icon, overlay)
+                overlay.overrideredirect(True)
+                overlay.attributes("-topmost", True)
+                overlay.attributes("-alpha", 0.35)
+                overlay.configure(bg="#6b7280", cursor="crosshair")
+                overlay.geometry(f"{width}x{height}{x:+d}{y:+d}")
+                overlay.bind("<Button-1>", self.finish_location_selection)
+                overlay.bind("<Escape>", self.cancel_location_selection)
 
-            if index == 0:
-                hint = tk.Label(
-                    overlay,
-                    text="Click anywhere to choose the click location. Press Esc to cancel.",
-                    bg="#374151",
-                    fg="white",
-                    font=("Segoe UI", 14),
-                    padx=18,
-                    pady=10,
-                )
-                hint.place(relx=0.5, rely=0.08, anchor="center")
-                hint.bind("<Button-1>", self.finish_location_selection)
+                if index == 0:
+                    hint = tk.Label(
+                        overlay,
+                        text="Click anywhere to choose the click location. Press Esc to cancel.",
+                        bg="#374151",
+                        fg="white",
+                        font=("Segoe UI", 14),
+                        padx=18,
+                        pady=10,
+                    )
+                    hint.place(relx=0.5, rely=0.08, anchor="center")
+                    hint.bind("<Button-1>", self.finish_location_selection)
+        finally:
+            restore_dpi_context(previous_context)
 
         if self.overlays:
             self.overlays[0].focus_force()
