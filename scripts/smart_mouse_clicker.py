@@ -52,8 +52,9 @@ SM_CYVIRTUALSCREEN = 79
 
 APP_NAME = "Smart Mouse Clicker V2"
 LEGACY_APP_NAME = "Smart Mouse Clicker"
-WINDOW_WIDTH = 620
-WINDOW_HEIGHT = 1100
+WINDOW_PREFERRED_WIDTH = 520
+WINDOW_EDGE_MARGIN = 48
+WINDOW_BOTTOM_MARGIN = 96
 
 DEFAULT_CONFIG = {
     "interval_minutes": 5,
@@ -260,7 +261,6 @@ class SmartClickerApp:
     def __init__(self, root):
         self.root = root
         self.root.title(APP_NAME)
-        self.root.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")
         self.root.resizable(False, False)
         self.config_path = get_config_path()
         self.saved_config = load_config()
@@ -290,25 +290,19 @@ class SmartClickerApp:
         self.clicks_text = tk.StringVar(value="Clicks: 0")
 
         self.build_ui()
+        self.size_window_to_content()
         self.root.after_idle(self.apply_window_icon, self.root)
         self.bind_setting_saves()
         self.root.protocol("WM_DELETE_WINDOW", self.quit_app)
         self.tick()
 
     def build_ui(self):
-        self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(0, weight=1)
-
-        frame = ttk.Frame(self.root, padding=22)
-        frame.grid(row=0, column=0, sticky="nsew")
+        frame = ttk.Frame(self.root, padding=16)
+        frame.grid(row=0, column=0, sticky="ew")
         frame.columnconfigure(0, weight=1)
-        for row, weight in ((0, 2), (1, 2), (2, 2), (3, 3)):
-            frame.rowconfigure(row, weight=weight)
 
-        interval_frame = ttk.LabelFrame(frame, text="Timing", padding=14)
+        interval_frame = ttk.LabelFrame(frame, text="Timing", padding=10)
         interval_frame.grid(row=0, column=0, sticky="ew")
-        interval_frame.rowconfigure(0, weight=1)
-        interval_frame.rowconfigure(1, weight=1)
 
         ttk.Label(interval_frame, text="Interval (minutes)").grid(row=0, column=0, sticky="w")
         ttk.Spinbox(
@@ -320,7 +314,7 @@ class SmartClickerApp:
             width=10,
         ).grid(row=0, column=1, sticky="e", padx=(12, 0))
 
-        ttk.Label(interval_frame, text="Random jitter (+/- seconds)").grid(row=1, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(interval_frame, text="Random jitter (+/- seconds)").grid(row=1, column=0, sticky="w", pady=(8, 0))
         ttk.Spinbox(
             interval_frame,
             from_=0,
@@ -328,12 +322,10 @@ class SmartClickerApp:
             increment=5,
             textvariable=self.jitter_seconds,
             width=10,
-        ).grid(row=1, column=1, sticky="e", padx=(12, 0), pady=(10, 0))
+        ).grid(row=1, column=1, sticky="e", padx=(12, 0), pady=(8, 0))
 
-        idle_frame = ttk.LabelFrame(frame, text="Safety", padding=14)
-        idle_frame.grid(row=1, column=0, sticky="ew", pady=(14, 0))
-        idle_frame.rowconfigure(0, weight=1)
-        idle_frame.rowconfigure(1, weight=1)
+        idle_frame = ttk.LabelFrame(frame, text="Safety", padding=10)
+        idle_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
 
         ttk.Checkbutton(
             idle_frame,
@@ -341,7 +333,7 @@ class SmartClickerApp:
             variable=self.idle_only,
         ).grid(row=0, column=0, columnspan=2, sticky="w")
 
-        ttk.Label(idle_frame, text="Required idle time (seconds)").grid(row=1, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(idle_frame, text="Required idle time (seconds)").grid(row=1, column=0, sticky="w", pady=(8, 0))
         ttk.Spinbox(
             idle_frame,
             from_=0,
@@ -349,12 +341,10 @@ class SmartClickerApp:
             increment=5,
             textvariable=self.idle_seconds,
             width=10,
-        ).grid(row=1, column=1, sticky="e", padx=(12, 0), pady=(10, 0))
+        ).grid(row=1, column=1, sticky="e", padx=(12, 0), pady=(8, 0))
 
-        click_frame = ttk.LabelFrame(frame, text="Click", padding=14)
-        click_frame.grid(row=2, column=0, sticky="ew", pady=(14, 0))
-        click_frame.rowconfigure(0, weight=1)
-        click_frame.rowconfigure(1, weight=1)
+        click_frame = ttk.LabelFrame(frame, text="Click", padding=10)
+        click_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
 
         ttk.Label(click_frame, text="Button").grid(row=0, column=0, sticky="w")
         ttk.Combobox(
@@ -370,14 +360,12 @@ class SmartClickerApp:
             column=0,
             columnspan=2,
             sticky="w",
-            pady=(10, 0),
+            pady=(8, 0),
         )
 
-        position_frame = ttk.LabelFrame(frame, text="Position", padding=14)
-        position_frame.grid(row=3, column=0, sticky="ew", pady=(14, 0))
+        position_frame = ttk.LabelFrame(frame, text="Position", padding=10)
+        position_frame.grid(row=3, column=0, sticky="ew", pady=(10, 0))
         position_frame.columnconfigure(1, weight=1)
-        for row in range(3):
-            position_frame.rowconfigure(row, weight=1)
 
         ttk.Checkbutton(
             position_frame,
@@ -385,14 +373,14 @@ class SmartClickerApp:
             variable=self.use_fixed_position,
         ).grid(row=0, column=0, columnspan=3, sticky="w")
 
-        ttk.Label(position_frame, text="Selected location").grid(row=1, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(position_frame, text="Selected location").grid(row=1, column=0, sticky="w", pady=(8, 0))
         ttk.Label(position_frame, textvariable=self.position_text).grid(
             row=1,
             column=1,
             columnspan=2,
             sticky="w",
             padx=(12, 0),
-            pady=(10, 0),
+            pady=(8, 0),
         )
 
         ttk.Button(position_frame, text="Choose Location", command=self.choose_location).grid(
@@ -400,11 +388,11 @@ class SmartClickerApp:
             column=0,
             columnspan=3,
             sticky="ew",
-            pady=(12, 0),
+            pady=(10, 0),
         )
 
         controls = ttk.Frame(frame)
-        controls.grid(row=4, column=0, sticky="ew", pady=(18, 0))
+        controls.grid(row=4, column=0, sticky="ew", pady=(14, 0))
         controls.columnconfigure(0, weight=1)
         controls.columnconfigure(1, weight=1)
 
@@ -413,12 +401,21 @@ class SmartClickerApp:
         self.stop_button = ttk.Button(controls, text="Stop", command=self.stop, state="disabled")
         self.stop_button.grid(row=0, column=1, sticky="ew", padx=(6, 0))
 
-        ttk.Label(frame, textvariable=self.status_text).grid(row=5, column=0, sticky="w", pady=(14, 0))
-        ttk.Label(frame, textvariable=self.countdown_text).grid(row=6, column=0, sticky="w", pady=(7, 0))
-        ttk.Label(frame, textvariable=self.clicks_text).grid(row=7, column=0, sticky="w", pady=(7, 0))
+        ttk.Label(frame, textvariable=self.status_text).grid(row=5, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(frame, textvariable=self.countdown_text).grid(row=6, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(frame, textvariable=self.clicks_text).grid(row=7, column=0, sticky="w", pady=(4, 0))
 
         for child in frame.winfo_children():
             child.grid_configure(padx=0)
+
+    def size_window_to_content(self):
+        """Keep the compact layout within the current screen's usable area."""
+        self.root.update_idletasks()
+        max_width = max(400, self.root.winfo_screenwidth() - WINDOW_EDGE_MARGIN)
+        max_height = max(480, self.root.winfo_screenheight() - WINDOW_BOTTOM_MARGIN)
+        width = min(max(self.root.winfo_reqwidth(), WINDOW_PREFERRED_WIDTH), max_width)
+        height = min(self.root.winfo_reqheight(), max_height)
+        self.root.geometry(f"{width}x{height}")
 
     @staticmethod
     def apply_window_icon(window):
